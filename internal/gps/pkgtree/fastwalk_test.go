@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package imports
+package pkgtree
 
 import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,31 +32,55 @@ func formatFileModes(m map[string]os.FileMode) string {
 	return buf.String()
 }
 
+func prepareTestDir(t *testing.T, files map[string]string) string {
+	tmpDir, err := ioutil.TempDir("", "fastwalk_test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for path, contents := range files {
+		file := filepath.Join(tmpDir, "src", path)
+		if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if strings.HasPrefix(contents, "LINK") {
+			err = os.Symlink(strings.TrimPrefix(contents, "LINK:"), file)
+		} else {
+			err = ioutil.WriteFile(file, []byte(contents), 0644)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return tmpDir
+}
+
 func testFastWalk(t *testing.T, files map[string]string, callback func(path string, typ os.FileMode) error, want map[string]os.FileMode) {
-	testConfig{
-		gopathFiles: files,
-	}.test(t, func(t *goimportTest) {
-		got := map[string]os.FileMode{}
-		var mu sync.Mutex
-		if err := fastWalk(t.gopath, func(path string, typ os.FileMode) error {
-			mu.Lock()
-			defer mu.Unlock()
-			if !strings.HasPrefix(path, t.gopath) {
-				t.Fatalf("bogus prefix on %q, expect %q", path, t.gopath)
-			}
-			key := filepath.ToSlash(strings.TrimPrefix(path, t.gopath))
-			if old, dup := got[key]; dup {
-				t.Fatalf("callback called twice for key %q: %v -> %v", key, old, typ)
-			}
-			got[key] = typ
-			return callback(path, typ)
-		}); err != nil {
-			t.Fatalf("callback returned: %v", err)
+	tmpDir := prepareTestDir(t, files)
+	defer os.RemoveAll(tmpDir)
+
+	got := map[string]os.FileMode{}
+	var mu sync.Mutex
+	if err := fastWalk(tmpDir, func(path string, typ os.FileMode) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if !strings.HasPrefix(path, tmpDir) {
+			t.Fatalf("bogus prefix on %q, expect %q", path, tmpDir)
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("walk mismatch.\n got:\n%v\nwant:\n%v", formatFileModes(got), formatFileModes(want))
+		key := filepath.ToSlash(strings.TrimPrefix(path, tmpDir))
+		if old, dup := got[key]; dup {
+			t.Fatalf("callback called twice for key %q: %v -> %v", key, old, typ)
 		}
-	})
+		got[key] = typ
+		return callback(path, typ)
+	}); err != nil {
+		t.Fatalf("callback returned: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("walk mismatch.\n got:\n%v\nwant:\n%v", formatFileModes(got), formatFileModes(want))
+	}
 }
 
 func TestFastWalk_Basic(t *testing.T) {

@@ -4,7 +4,7 @@
 
 // +build linux,!appengine darwin
 
-package imports
+package pkgtree
 
 import "syscall"
 

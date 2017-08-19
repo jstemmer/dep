@@ -4,7 +4,7 @@
 
 // +build linux,!appengine darwin freebsd openbsd netbsd
 
-package imports
+package pkgtree
 
 import (
 	"bytes"
