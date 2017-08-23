@@ -39,7 +39,7 @@ var traverseLink = errors.New("traverse symlink, assuming target is a directory"
 //   * fastWalk can follow symlinks if walkFn returns the traverseLink
 //     sentinel error. It is the walkFn's responsibility to prevent
 //     fastWalk from going into symlink cycles.
-func fastWalk(root string, walkFn func(path string, typ os.FileMode) error) error {
+func fastWalk(root string, walkFn func(path string, typ os.FileMode, err error) error) error {
 	// TODO(bradfitz): make numWorkers configurable? We used a
 	// minimum of 4 to give the kernel more info about multiple
 	// things we want, in hopes its I/O scheduling can take
@@ -58,8 +58,8 @@ func fastWalk(root string, walkFn func(path string, typ os.FileMode) error) erro
 
 	w := &walker{
 		fn:       walkFn,
-		enqueuec: make(chan walkItem, numWorkers), // buffered for performance
-		workc:    make(chan walkItem, numWorkers), // buffered for performance
+		enqueuec: make(chan string, numWorkers), // buffered for performance
+		workc:    make(chan string, numWorkers), // buffered for performance
 		donec:    make(chan struct{}),
 
 		// buffered for correctness & not leaking goroutines:
@@ -71,18 +71,26 @@ func fastWalk(root string, walkFn func(path string, typ os.FileMode) error) erro
 		wg.Add(1)
 		go w.doWork(&wg)
 	}
-	todo := []walkItem{{dir: root}}
+
+	if err := w.fn(root, os.ModeDir, nil); err != nil {
+		if err == filepath.SkipDir {
+			return nil
+		}
+		return err
+	}
+
+	todo := []string{root}
 	out := 0
 	for {
 		workc := w.workc
-		var workItem walkItem
+		var path string
 		if len(todo) == 0 {
 			workc = nil
 		} else {
-			workItem = todo[len(todo)-1]
+			path = todo[len(todo)-1]
 		}
 		select {
-		case workc <- workItem:
+		case workc <- path:
 			todo = todo[:len(todo)-1]
 			out++
 		case it := <-w.enqueuec:
@@ -118,70 +126,51 @@ func (w *walker) doWork(wg *sync.WaitGroup) {
 		select {
 		case <-w.donec:
 			return
-		case it := <-w.workc:
+		case path := <-w.workc:
 			select {
 			case <-w.donec:
 				return
-			case w.resc <- w.walk(it.dir, !it.callbackDone):
+			case w.resc <- w.walk(path):
 			}
 		}
 	}
 }
 
 type walker struct {
-	fn func(path string, typ os.FileMode) error
+	fn func(path string, typ os.FileMode, err error) error
 
 	donec    chan struct{} // closed on fastWalk's return
-	workc    chan walkItem // to workers
-	enqueuec chan walkItem // from workers
+	workc    chan string   // to workers
+	enqueuec chan string   // from workers
 	resc     chan error    // from workers
 }
 
-type walkItem struct {
-	dir          string
-	callbackDone bool // callback already called; don't do it again
-}
-
-func (w *walker) enqueue(it walkItem) {
+func (w *walker) enqueue(path string) {
 	select {
-	case w.enqueuec <- it:
+	case w.enqueuec <- path:
 	case <-w.donec:
 	}
 }
 
 func (w *walker) onDirEnt(dirName, baseName string, typ os.FileMode) error {
 	joined := dirName + string(os.PathSeparator) + baseName
-	if typ == os.ModeDir {
-		w.enqueue(walkItem{dir: joined})
+	err := w.fn(joined, typ, nil)
+	if err == filepath.SkipDir {
 		return nil
+	} else if err == traverseLink && typ == os.ModeSymlink {
+		w.enqueue(joined)
+	} else if err != nil {
+		return err
+	} else if typ == os.ModeDir {
+		w.enqueue(joined)
 	}
-
-	err := w.fn(joined, typ)
-	if typ == os.ModeSymlink {
-		if err == traverseLink {
-			// Set callbackDone so we don't call it twice for both the
-			// symlink-as-symlink and the symlink-as-directory later:
-			w.enqueue(walkItem{dir: joined, callbackDone: true})
-			return nil
-		}
-		if err == filepath.SkipDir {
-			// Permit SkipDir on symlinks too.
-			return nil
-		}
-	}
-	return err
+	return nil
 }
 
-func (w *walker) walk(root string, runUserCallback bool) error {
-	if runUserCallback {
-		err := w.fn(root, os.ModeDir)
-		if err == filepath.SkipDir {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+func (w *walker) walk(root string) error {
+	err := readDir(root, w.onDirEnt)
+	if err != nil {
+		return err
 	}
-
-	return readDir(root, w.onDirEnt)
+	return err
 }

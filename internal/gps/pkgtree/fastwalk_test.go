@@ -63,7 +63,10 @@ func testFastWalk(t *testing.T, files map[string]string, callback func(path stri
 
 	got := map[string]os.FileMode{}
 	var mu sync.Mutex
-	if err := fastWalk(tmpDir, func(path string, typ os.FileMode) error {
+	if err := fastWalk(tmpDir, func(path string, typ os.FileMode, err error) error {
+		if err != nil {
+			return err
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if !strings.HasPrefix(path, tmpDir) {
@@ -188,7 +191,7 @@ var benchDir = flag.String("benchdir", runtime.GOROOT(), "The directory to scan 
 func BenchmarkFastWalk(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		err := fastWalk(*benchDir, func(path string, typ os.FileMode) error { return nil })
+		err := fastWalk(*benchDir, func(path string, typ os.FileMode, err error) error { return err })
 		if err != nil {
 			b.Fatal(err)
 		}
